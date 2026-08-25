@@ -1,0 +1,192 @@
+name: build
+# A pushed tag also publishes a release (see the `publish` job below), so
+# it gets called out by name; other triggers just validate the build.
+run-name: >-
+  build ·
+  ${{ github.event_name == 'schedule' && 'scheduled'
+      || github.event_name == 'workflow_dispatch' && format('manual by {0}', github.actor)
+      || github.ref_type == 'tag' && format('tag {0}', github.ref_name)
+      || github.event.head_commit.message }}
+
+on:
+  push:
+    branches: ['**']
+    tags: ['**']
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1'
+
+jobs:
+  matrix:
+    uses: ./.github/workflows/matrix.yml
+
+  build:
+    needs: matrix
+    name: build (${{ matrix.distro }}-${{ matrix.distro_ver }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.matrix.outputs.build_matrix) }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+
+      - name: detect-versions.sh selftest
+        run: scripts/detect-versions.sh --selftest
+
+      # The vendored devcontainer action does `npm install -g
+      # @devcontainers/cli` unconditionally on every job - caches its
+      # download cache across this workflow's 8 legs. No fixed key: a new
+      # cache is written every run (seeded via restore-keys) so a real
+      # upstream release is never left stuck behind a stale entry.
+      - name: cache npm
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
+      # No username/password here, unlike images.yml - this job only ever
+      # builds (using --cache-from against the tag images.yml already
+      # pushed), never pushes, so it needs no `packages: write`.
+      - name: devcontainer
+        id: devcontainer
+        uses: ./.github/workflows/actions/devcontainer
+        env:
+          BASE_IMAGE: ${{ matrix.base_image }}
+        with:
+          variant: ${{ matrix.distro }}-${{ matrix.distro_ver }}
+          platform: linux/${{ matrix.arch }}
+
+      - name: detect versions (in-container)
+        run: ${{ steps.devcontainer.outputs.exec }} scripts/detect-versions.sh >> "$GITHUB_ENV"
+
+      - name: cache ct-ng sources
+        uses: actions/cache@v6
+        with:
+          path: .ctng-cache
+          key: ctng-src-${{ matrix.distro }}-${{ matrix.distro_ver }}-${{ env.GCC_VERSION }}-${{ env.BINUTILS_VERSION }}-${{ env.GLIBC_VERSION }}
+
+      # Separate from .ctng-cache above: that one caches downloaded source
+      # tarballs (architecture-independent), this one caches compiled
+      # objects (ccache; architecture-specific, hence `matrix.arch` in the
+      # key). restore-keys falls back across a version bump since ccache's
+      # own content hashing makes stale entries just inert extra bytes.
+      - name: cache ccache
+        uses: actions/cache@v6
+        with:
+          path: .ccache
+          key: ccache-${{ matrix.distro }}-${{ matrix.distro_ver }}-${{ matrix.arch }}-${{ env.GCC_VERSION }}-${{ env.BINUTILS_VERSION }}-${{ env.GLIBC_VERSION }}
+          restore-keys: |
+            ccache-${{ matrix.distro }}-${{ matrix.distro_ver }}-${{ matrix.arch }}-
+
+      # `devcontainer exec`'s env is otherwise empty - only PLATFORM is
+      # forwarded automatically. GCC_VERSION/BINUTILS_VERSION/GLIBC_VERSION
+      # and DISTRO/DISTRO_VER/ARCH need their own --remote-env flags, or
+      # build.sh's `: "${GCC_VERSION:?}"` fails immediately.
+      #
+      # render/defconfig/compile/package are separate steps (rather than
+      # one "build" step running scripts/build.sh end to end) so a failure
+      # in any one phase shows up as that specific step going red.
+      - name: render config
+        run: |
+          ${{ steps.devcontainer.outputs.exec }} \
+            --remote-env GCC_VERSION="$GCC_VERSION" \
+            --remote-env BINUTILS_VERSION="$BINUTILS_VERSION" \
+            --remote-env GLIBC_VERSION="$GLIBC_VERSION" \
+            scripts/build.sh render
+
+      - name: ct-ng defconfig
+        run: ${{ steps.devcontainer.outputs.exec }} scripts/build.sh defconfig
+
+      - name: ct-ng build
+        run: ${{ steps.devcontainer.outputs.exec }} scripts/build.sh compile
+
+      - name: package
+        run: |
+          ${{ steps.devcontainer.outputs.exec }} \
+            --remote-env GCC_VERSION="$GCC_VERSION" \
+            --remote-env BINUTILS_VERSION="$BINUTILS_VERSION" \
+            --remote-env GLIBC_VERSION="$GLIBC_VERSION" \
+            --remote-env DISTRO="${{ matrix.distro }}" \
+            --remote-env DISTRO_VER="${{ matrix.distro_ver }}" \
+            --remote-env ARCH="${{ matrix.arch }}" \
+            scripts/build.sh package
+
+      - name: smoke test (build tree)
+        run: ${{ steps.devcontainer.outputs.exec }} scripts/smoke-test.sh --build-tree .ctng-work/install
+
+      - name: smoke test (packaged artifact)
+        run: |
+          TARBALL=$(ls dist/riscv32-linux-gnu-*.tar.xz)
+          ${{ steps.devcontainer.outputs.exec }} scripts/smoke-test.sh --packaged "$TARBALL"
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: riscv32-linux-gnu-${{ matrix.distro }}-${{ matrix.distro_ver }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Runs only on a pushed tag (github.ref_type is "branch" for
+  # dispatch/schedule/branch-push triggers of `build` above). One release
+  # per pushed tag, bundling all 8 build legs' tarballs together.
+  publish:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+
+      # Deliberately NOT merge-multiple: every leg's SHASUMS256.txt and
+      # versions.env share the same filename, so merging all 8 into one
+      # flat directory would let them clobber each other. Without
+      # merge-multiple, download-artifact places each matched artifact
+      # under its own dist-combined/<artifact-name>/ subdirectory instead.
+      - name: download all 8 build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: riscv32-linux-gnu-*
+          path: dist-combined
+
+      - name: check release doesn't already exist
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: attest build provenance
+        if: steps.release.outputs.exists == 'false'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: 'dist-combined/**/riscv32-linux-gnu-*.tar.xz'
+
+      - name: create release
+        if: steps.release.outputs.exists == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          # A single combined SHASUMS256.txt covering all 8 tarballs, not
+          # the 8 identically-named per-leg ones (gh release create rejects
+          # duplicate asset basenames within one release).
+          find dist-combined -name SHASUMS256.txt -exec cat {} + > combined-shasums.txt
+          gh release create "$TAG" \
+            $(find dist-combined -name 'riscv32-linux-gnu-*.tar.xz') \
+            combined-shasums.txt \
+            --title "$TAG" --generate-notes

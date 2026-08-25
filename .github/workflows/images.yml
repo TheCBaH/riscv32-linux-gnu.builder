@@ -1,0 +1,49 @@
+name: images
+run-name: images · ${{ github.event.head_commit.message }}
+
+on:
+  push:
+    branches:
+      - '**'
+
+jobs:
+  matrix:
+    uses: ./.github/workflows/matrix.yml
+
+  devcontainer:
+    needs: matrix
+    name: devcontainer (${{ matrix.distro }}-${{ matrix.distro_ver }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.matrix.outputs.build_matrix) }}
+    permissions:
+      packages: write
+    steps:
+      - name: checkout
+        uses: actions/checkout@v7
+
+      # See build.yml's identical step for why: caches the vendored
+      # action's unconditional `npm install -g @devcontainers/cli`.
+      - name: cache npm
+        uses: actions/cache@v6
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
+      - name: image
+        id: devcontainer
+        uses: ./.github/workflows/actions/devcontainer
+        env:
+          BASE_IMAGE: ${{ matrix.base_image }}
+        with:
+          variant: ${{ matrix.distro }}-${{ matrix.distro_ver }}
+          platform: linux/${{ matrix.arch }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: smoke test (devcontainer)
+        run: ${{ steps.devcontainer.outputs.exec }} ct-ng version

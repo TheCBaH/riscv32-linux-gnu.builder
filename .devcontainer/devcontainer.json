@@ -1,0 +1,28 @@
+// For format details, see https://aka.ms/devcontainer.json.
+{
+    "name": "riscv32-linux-gnu.builder",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "args": {
+            // Full base image tag (e.g. "debian:13", "ubuntu:22.04"), set
+            // per matrix leg by the calling workflow via BASE_IMAGE.
+            "VARIANT": "${localEnv:BASE_IMAGE:debian:13}"
+        }
+    },
+    "features": {
+        // Plain debian:*/ubuntu:* base images mostly define no non-root
+        // user, but `ct-ng build` refuses to run as root. Same feature
+        // devcontainer.CompCert's own devcontainer.json uses.
+        //
+        // userUid/userGid left at their feature default ("automatic"), not
+        // hardcoded to "1000" - ubuntu:24.04 already ships a default
+        // "ubuntu" user/group at UID/GID 1000, so a hardcoded 1000 here
+        // would collide and fail the devcontainer build on that leg.
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "installZsh": "false",
+            "username": "vscode",
+            "upgradePackages": "false"
+        }
+    },
+    "remoteUser": "vscode"
+}

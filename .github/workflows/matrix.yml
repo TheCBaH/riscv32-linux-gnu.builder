@@ -1,0 +1,42 @@
+name: matrix
+
+# Single source of truth for the distro/version/arch combinations this repo
+# builds for. build.yml and images.yml both `needs: matrix` and consume its
+# outputs instead of each hand-carrying their own copy of this list.
+
+on:
+  workflow_call:
+    outputs:
+      build_matrix:
+        description: 'JSON array of {distro, distro_ver, base_image, arch} objects - one per toolchain/image build leg'
+        value: ${{ jobs.matrix.outputs.build_matrix }}
+
+jobs:
+  matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      build_matrix: ${{ steps.matrix.outputs.build_matrix }}
+    steps:
+      - name: matrix
+        id: matrix
+        run: |
+          python3 - <<'EOF'
+          import json, os
+
+          distros = [
+              {"distro": "debian", "distro_ver": "12", "base_image": "debian:12"},
+              {"distro": "debian", "distro_ver": "13", "base_image": "debian:13"},
+              {"distro": "ubuntu", "distro_ver": "22.04", "base_image": "ubuntu:22.04"},
+              {"distro": "ubuntu", "distro_ver": "24.04", "base_image": "ubuntu:24.04"},
+          ]
+          arches = ["amd64", "arm64"]
+
+          build_matrix = [dict(d, arch=a) for d in distros for a in arches]
+
+          def write_output(f, name, value):
+              f.write(f"{name}<<__OUTPUT__\n{value}\n__OUTPUT__\n")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              write_output(f, "build_matrix", json.dumps(build_matrix, indent=2))
+          EOF
+          cat "$GITHUB_OUTPUT"

@@ -1,0 +1,70 @@
+# crosstool-ng defconfig template for riscv32-linux-gnu (rv32gc/ilp32d).
+#
+# This is a *defconfig* (minimal, `ct-ng savedefconfig` output), not a full
+# expanded .config - much easier to keep sed-able. `scripts/build.sh`
+# renders it with `sed` (not envsubst - .config values can legitimately
+# contain '$') and feeds the result to `ct-ng defconfig`, which re-expands
+# it to a full .config before `ct-ng build`.
+#
+# Derived from crosstool-ng 1.27.0's own `riscv64-unknown-linux-gnu` sample
+# (there is no riscv32-*-linux-gnu sample in this release, only bare-metal
+# riscv32-*-elf ones):
+#   - CT_ARCH_ARCH/CT_ARCH_ABI overridden to rv32gc/ilp32d.
+#   - CT_CC_LANG_CXX turned off (C-only, matching devcontainer.CompCert's
+#     scope).
+#   - CT_OMIT_TARGET_VENDOR=y is required, not merely CT_TARGET_VENDOR="" -
+#     GNU config.sub re-inserts "unknown" as the vendor field when
+#     canonicalizing a vendor-less triple unless this is also set, and a
+#     "riscv32-unknown-linux-gnu" prefix wouldn't match err-trace's
+#     asm/tools/lib/target.ml (`toolprefix = "riscv32-linux-gnu-"`).
+#   - CT_EXPERIMENTAL=y is required for other, unrelated options this repo
+#     doesn't use; it does not gate which GCC/binutils/glibc versions are
+#     selectable.
+#   - CT_GCC_VERSION/CT_BINUTILS_VERSION/CT_GLIBC_VERSION/CT_LINUX_VERSION
+#     are NOT set here. Each is a Kconfig `string` with only a
+#     `default "X" if PKG_V_SYM` entry and no prompt of its own, so writing
+#     it directly into a defconfig is silently ignored - the buildable
+#     versions are a curated, checksummed catalog, one Kconfig choice
+#     member per version. scripts/build.sh appends the resolved
+#     `CT_GCC_V_<sym>=y` / `CT_BINUTILS_V_<sym>=y` / `CT_GLIBC_V_<sym>=y` /
+#     `CT_LINUX_V_<sym>=y` lines (from scripts/resolve-ctng-version.py) to
+#     this rendered template before running `ct-ng defconfig`.
+#   - CT_DEBUG_GDB and its sub-options are left at the sample's own
+#     defaults - disabling CT_DEBUG_GDB pulled in an unexplained
+#     CT_COMP_LIBS_EXPAT=y side effect via ct-ng's Kconfig select/default
+#     chain.
+#   - CT_LINUX_VERSION targets the 6.6 LTS series (resolved against the
+#     catalog like the other three), not detected from the host - glibc's
+#     minimum supported kernel is far below any current release, so kernel
+#     UAPI headers don't need to track the host's own kernel version.
+#
+# @TARBALLS_DIR@ / @PREFIX_DIR@ are absolute, workspace-relative paths
+# scripts/build.sh computes at render time, so actions/cache and
+# actions/upload-artifact (both runner-side) can reach them.
+
+CT_CONFIG_VERSION="4"
+CT_EXPERIMENTAL=y
+# ct-ng's default progress bar redraws via carriage return on every log
+# line - fine on a real terminal, but GitHub Actions has no TTY to
+# overwrite in place, so every redraw becomes its own log line (a single
+# job's log reached 300k+ lines from this alone). Plain prompted bool,
+# unlike the version fields above - freely settable directly.
+# CT_LOG_PROGRESS_BAR is not set
+CT_ARCH_RISCV=y
+CT_OMIT_TARGET_VENDOR=y
+# CT_DEMULTILIB is not set
+CT_ARCH_USE_MMU=y
+CT_ARCH_ARCH="rv32gc"
+CT_ARCH_ABI="ilp32d"
+CT_KERNEL_LINUX=y
+# The linux-6.6.74 tarball is consistently slow to fetch from GitHub-hosted
+# runners; raised from ct-ng's own default ("--tries=3 -nc
+# --progress=dot:binary") to give slow-but-progressing transfers more
+# chances instead of giving up partway through.
+CT_DOWNLOAD_WGET_OPTIONS="--tries=8 -nc --progress=dot:giga --timeout=180"
+CT_DEBUG_GDB=y
+# CT_GDB_CROSS_PYTHON is not set
+# CT_GDB_GDBSERVER is not set
+# CT_CC_LANG_CXX is not set
+CT_LOCAL_TARBALLS_DIR="@TARBALLS_DIR@"
+CT_PREFIX_DIR="@PREFIX_DIR@"
